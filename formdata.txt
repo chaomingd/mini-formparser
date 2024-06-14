@@ -1,0 +1,20 @@
+--boundary\r\n
+Content-Disposition: form-data; name="field1"\r\n
+\r\n
+value1\r\n
+--boundary\r\n
+Content-Disposition: form-data; name="field2"; filename="example.txt"\r\n
+Content-Type: text/plain
+\r\n
+value2\r\n
+--boundary--\r\n
+
+
+value1\r\n
+--bounda
+
+
+
+
+value1\r\n
+--boundar
