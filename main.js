@@ -6,6 +6,9 @@ const fs = require('fs');
 const http = require('http');
 
 const DELIMITER = Buffer.from('\r\n');
+const CONTENT_DISPOSITION = Buffer.from('Content-Disposition');
+const CONTENT_TYPE = Buffer.from('Content-Type');
+const END_DELIMITER = Buffer.from('--');
 const FILE_STREAM = Symbol('fileStream');
 class FormParser extends Writable {
   constructor(options) {
@@ -21,23 +24,21 @@ class FormParser extends Writable {
       '_readBoundary',
       '_readDelimiter',
       '_readContentDisposition',
-      '_readDelimiter',
+      '_readContentType',
+      '_readDelimiter'
     ];
     this._boundary = 'boundary';
     // 读取的content-disposition对象
     this._contentDispositionObj = null;
     this._setBoundary(options.req);
     this._options.req.pipe(this);
+    this._isEnd = false;
   }
   _write(chunk, _, callback) {
     let writeLength = 0;
     while (writeLength < chunk.length) {
       this._fillToLeft();
-      const copyLength = chunk.copy(
-        this._buffer,
-        this._p,
-        writeLength
-      );
+      const copyLength = chunk.copy(this._buffer, this._p, writeLength);
       this._p += copyLength;
       writeLength += copyLength;
       try {
@@ -52,42 +53,48 @@ class FormParser extends Writable {
 
   _final(callback) {
     // console.log(this._buffer.toString())
-    this._readBoundary(true);
+    let error = null;
+    if (!this._isEnd) {
+      error = new Error('invalid end');
+    }
     this._normalizeFormData();
 
     console.log(this.formData);
-    callback(); // 告诉 Node.js 清理工作已完成
+    callback(error); // 告诉 Node.js 清理工作已完成
   }
 
   // 读取\r\n
   _readDelimiter() {
-    const findIndex = this._getBuffer().indexOf(DELIMITER);
+    const findIndex = this._indexOf(DELIMITER);
+    if (findIndex === -1) {
+      return 0;
+    }
+    
     if (findIndex !== 0) {
-      return false;
+      if (this._buffer.subarray(this._readIndex, this._readIndex + findIndex).equals(END_DELIMITER)) {
+        this._isEnd = true;
+        this._readIndex = this._p;
+        return this._readTypes.length;
+      }
+      throw new Error('invalid delimiter');
     }
     this._readIndex += DELIMITER.byteLength;
-    return true;
+    return 1;
   }
 
   // 读取分隔符
-  _readBoundary(end = false) {
+  _readBoundary() {
     let boundary = '--' + this._boundary;
-    if (end) {
-      boundary = '--';
-    }
     const boundaryBuf = Buffer.from(boundary);
 
-    const findIndex = this._getBuffer().indexOf(boundaryBuf);
+    const findIndex = this._indexOf(boundaryBuf);
     if (findIndex === -1) {
-      const endIndex = this._getLastIndex() - boundaryBuf.byteLength;
+      const endIndex = this._getLastIndex() - boundaryBuf.byteLength + 1;
       if (endIndex > this._readIndex) {
-        this._collectionFormData(
-          this._readIndex,
-          this._getLastIndex() - boundaryBuf.byteLength
-        );
-        this._readIndex = this._getLastIndex() - boundaryBuf.byteLength;
+        this._collectionFormData(this._readIndex, endIndex);
+        this._readIndex = endIndex;
       }
-      return false;
+      return 0;
     }
 
     // 如果读取到了分隔符，说明上一个数据已经读取完毕，将上一个数据存储到data中
@@ -99,17 +106,18 @@ class FormParser extends Writable {
       this._contentDispositionObj = null;
     }
     this._readIndex += findIndex + boundaryBuf.byteLength;
-    return true;
+    return 1;
+  }
+
+  _indexOf(buffer) {
+    return this._getBuffer().indexOf(buffer);
   }
 
   // 读取 Content-Disposition
   _readContentDisposition() {
-    if (this._getBuffer().indexOf('Content-Disposition') === -1) {
-      return false;
-    }
-    const findIndex = this._getBuffer().indexOf(DELIMITER);
+    const findIndex = this._indexOf(DELIMITER);
     if (findIndex === -1) {
-      return false;
+      return 0;
     }
     const contentDisposition = this._buffer
       .subarray(this._readIndex, this._readIndex + findIndex)
@@ -130,48 +138,48 @@ class FormParser extends Writable {
       contentDispositionObj[trimQuotation(key)] = trimQuotation(value);
     });
 
+    this._contentDispositionObj = contentDispositionObj;
     // 移动指针
-    const readIndex = this._readIndex;
     this._readIndex += findIndex + DELIMITER.byteLength;
-
-    if (contentDispositionObj.filename) {
-      // 读取 Content-Type
-      const findContentTypeIndex = this._getBuffer().indexOf('Content-Type');
-      if (findContentTypeIndex === -1) {
-        this._readIndex = readIndex;
-        return false;
-      }
-      const contentTypeEndIndex = this._getBuffer().indexOf(DELIMITER);
-      if (contentTypeEndIndex === -1) {
-        this._readIndex = readIndex;
-        return false;
-      }
-      const contentType = this._buffer
-        .subarray(this._readIndex, this._readIndex + contentTypeEndIndex)
-        .toString();
-      const contentTypeInfo = this._parseContentType(
-        contentType.split(': ')[1]
-      );
-      // console.log('content-disposition', contentTypeValueItems)
-      contentDispositionObj['contentType'] = contentTypeInfo.value;
-      contentDispositionObj['contentTypeInfo'] = contentTypeInfo;
-      this._readIndex += contentTypeEndIndex + DELIMITER.byteLength;
-      if (contentDispositionObj['filename']) {
-        const filename = path.join(
-          this._options.uploadDir,
-          uuid() + path.extname(contentDispositionObj['filename'])
-        );
-        const fileStream = this._options.getFile
-          ? Promise.resolve(this._options.getFile(contentDispositionObj))
-          : fs.createWriteStream(filename);
-        contentDispositionObj[FILE_STREAM] = fileStream;
-        contentDispositionObj['filename'] = filename;
-      }
-    }
-
+    
     this._contentDispositionObj = contentDispositionObj;
 
-    return true;
+    return 1;
+  }
+
+  _readContentType() {
+    // 读取 Content-Type
+    const contentTypeEndIndex = this._indexOf(DELIMITER);
+    if (contentTypeEndIndex === -1) {
+      return 0;
+    }
+    if (contentTypeEndIndex === 0) {
+      this._readIndex += DELIMITER.byteLength;
+      return 2;
+    }
+    const contentType = this._buffer
+      .subarray(this._readIndex, this._readIndex + contentTypeEndIndex)
+      .toString();
+    const contentTypeInfo = this._parseContentType(contentType.split(': ')[1]);
+    // console.log('content-disposition', contentTypeValueItems)
+    const contentDispositionObj = this._contentDispositionObj || {};
+    contentDispositionObj['contentType'] = contentTypeInfo.value;
+    contentDispositionObj['contentTypeInfo'] = contentTypeInfo;
+    
+    if (contentDispositionObj['filename']) {
+      const filename = path.join(
+        this._options.uploadDir,
+        uuid() + path.extname(contentDispositionObj['filename'])
+      );
+      const fileStream = this._options.getFile
+        ? Promise.resolve(this._options.getFile(contentDispositionObj))
+        : fs.createWriteStream(filename);
+      contentDispositionObj[FILE_STREAM] = fileStream;
+      contentDispositionObj['filename'] = filename;
+    }
+    this._readIndex += contentTypeEndIndex + DELIMITER.byteLength;
+    this._contentDispositionObj = contentDispositionObj;
+    return 1;
   }
 
   _getBuffer() {
@@ -300,14 +308,17 @@ class FormParser extends Writable {
   }
 
   _readFormData() {
+    if (this._isEnd) {
+      throw new Error('multpart/form-data invalid end');
+    }
     while (this._readTypeIndex < this._readTypes.length) {
       if (this._readIndex >= this._getLastIndex()) return;
       const readType = this._readTypes[this._readTypeIndex];
-      const isRead = this[readType]();
-      if (!isRead) {
+      const nextStep = this[readType]();
+      if (nextStep === 0) {
         return;
       }
-      this._readTypeIndex++;
+      this._readTypeIndex += nextStep;
     }
     this._readTypeIndex = 0;
   }
