@@ -255,12 +255,11 @@ class FormParser extends Writable {
             });
           } else {
             switch (value) {
-              case 'text/plain':
-                this.formData[key].push(fieldValue.data.toString());
               case 'application/json':
                 this.formData[key].push(JSON.parse(fieldValue.data.toString()));
                 break;
               default:
+                this.formData[key].push(fieldValue.data.toString());
             }
           }
         } else {
